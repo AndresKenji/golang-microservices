@@ -319,7 +319,428 @@ El nuevo manejador llama a h.ServeHTTP para manejar cada solicitud, pero si una 
 
 Los dos últimos handlers son especialmente interesantes, ya que, en efecto, encadenan handlers. Esta es una técnica que abordaremos más a fondo en un capítulo posterior, ya que permite practicar código limpio y mantener tu código DRY (Don't Repeat Yourself).
 
-Puede que haya tomado la mayoría de las descripciones para estos handlers directamente de la documentación de Go, y probablemente ya las hayas leído porque, ¿has leído la documentación, verdad? Con Go, la documentación es excelente y escribir documentación para tus propios paquetes está muy recomendado, incluso es obligatorio si usas el comando golint que viene con el paquete estándar; esto reportará áreas de tu código que no se ajustan a los estándares. Realmente recomiendo pasar un tiempo navegando por la documentación estándar cuando uses uno de los paquetes; no solo aprenderás el uso correcto, sino que también puedes descubrir un enfoque mejor. Sin duda estarás expuesto a buenas prácticas y estilos, y quizás incluso puedas seguir trabajando en el triste día en que Stack Overflow deje de funcionar y toda la industria se detenga.
+
+## Crear Handlers
+
+Para finalizar el ejemplo vamos a crear un Handler en lugar de solo usar **HandleFunc**. Vamos a dividir el código que realiza la validación de solicitudes para nuestro endpoint helloworld y el código que devuelve la respuesta en manejadores separados para ilustrar cómo es posible encadenar manejadores.
+
+```go
+type validationHandler struct {
+    next http.Handler
+}
+
+func newValidationHandler(next http.Handler) http.Handler {
+    return validationHandler{next: next}
+}
+```
+
+Lo primero que necesitamos hacer al crear nuestro propio Handler es definir un campo en la estructura que implementará los métodos en la interfaz Handler. En este ejemplo vamos a encadenar Handlers, el primer Handler, que es nuestro manejador de validación, necesita tener una referencia al siguiente en la cadena, ya que tiene la responsabilidad de llamar a **ServeHTTP** o devolver una respuesta.
+
+Para mayor comodidad, hemos añadido una función que nos devuelve un nuevo manejador; sin embargo, podríamos haber configurado simplemente el campo **next**. Este método, sin embargo, es una mejor práctica, ya que hace que nuestro código sea un poco más fácil de leer y, cuando necesitamos pasar dependencias complejas al manejador, usar una función para crear el manejador mantiene las cosas un poco más ordenadas:
+
+```go
+func (h validationHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+    var request helloWorldRequest
+    decoder := json.NewDecoder(r.Body)
+
+    err := decoder.Decode(&request)
+    if err != nil {
+        http.Error(rw, "Bad request", http.StatusBadRequest)
+        return
+    }
+
+    h.next.ServeHTTP(rw, r)
+}
+```
+El bloque de código anterior ilustra cómo implementaríamos el método ServeHTTP. Lo único interesante que cabe destacar aquí es la instrucción que comienza en la línea del return. Si se devuelve un error al decodificar la solicitud, escribimos un error 500 en la respuesta, y la cadena de manejadores se detendría aquí. Solo cuando no se devuelve ningún error llamamos al siguiente manejador en la cadena, y lo hacemos simplemente invocando su método ServeHTTP. Para pasar el nombre decodificado de la solicitud, simplemente estamos configurando una variable:
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+)
+
+type helloWorldResponse struct {
+	Message string `json:"message"`
+}
+
+type helloWorldRequest struct {
+	Name string `json:"name"`
+}
+
+func main() {
+	port := 8080
+
+	handler := newValidationHandler(newHelloWorldHandler())
+
+	http.Handle("/helloworld", handler)
+
+	log.Printf("Server starting on port %v\n", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", port), nil))
+}
+
+type validationHandler struct {
+	next http.Handler
+}
+
+func newValidationHandler(next http.Handler) http.Handler {
+	return validationHandler{next: next}
+}
+
+func (h validationHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	var request helloWorldRequest
+	decoder := json.NewDecoder(r.Body)
+
+	err := decoder.Decode(&request)
+	if err != nil {
+		http.Error(rw, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	h.next.ServeHTTP(rw, r)
+}
+
+type helloWorldHandler struct{}
+
+func newHelloWorldHandler() http.Handler {
+	return helloWorldHandler{}
+}
+
+func (h helloWorldHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	response := helloWorldResponse{Message: "Hello"}
+
+	encoder := json.NewEncoder(rw)
+	encoder.Encode(response)
+}
+```
+El tipo **helloWorldHandler** que escribe la respuesta no se ve muy diferente de cuando estábamos usando una función simple. lo único que realmente hemos hecho es eliminar la decodificación de la solicitud.
+
+Ahora, este código es puramente para ilustrar cómo se puede hacer algo, no necesariamente es la mejor manera de hacerlo. 
+En este caso simple, dividir la validación de la solicitud y el envío de la respuesta en dos manejadores agrega mucha complejidad innecesaria y realmente no está haciendo nuestro código más DRY (Don't Repeat Yourself). Sin embargo, la técnica es útil. 
+
+
+
+# Context
+
+El problema con el patrón anterior es que no hay forma de pasar la solicitud validada de un Handler al siguiente sin romper la interfaz http.Handler. Pero Go tiene una solución. 
+El paquete **context**; el tipo Context implementa un método seguro para acceder a datos con alcance de solicitud que es seguro para usar simultáneamente por múltiples rutinas de Go. 
+
+## Background
+
+El método Background devuelve un contexto vacío que no tiene valores; típicamente es utilizado por la función main y como el contexto de nivel superior:
+`func Background() Context`
+
+## WithCancel
+
+El método WithCancel devuelve una copia del contexto padre con una función de cancelación. Llamar a la función de cancelación libera los recursos asociados con el contexto y debe ser llamada tan pronto como las operaciones que se ejecutan en el tipo Context se completen:
+`func WithCancel(parent Context) (ctx Context, cancel CancelFunc)`
+
+## WithDeadline
+
+El método WithDeadline devuelve una copia del contexto padre que expira después de que el tiempo actual sea mayor que el tiempo (deadline). En este punto, el canal **Done** del contexto se cierra y los recursos asociados se liberan. 
+También devuelve un método **CancelFunc** que permite la cancelación manual del contexto:
+`func WithDeadline(parent Context, deadline time.Time) (Context, CancelFunc)`
+
+
+## WithTimeout
+El método WithTimeout es similar a WithDeadline, excepto que en lugar de un plazo específico, le pasas una duración por la cual el tipo Context debería existir. Una vez que esta duración ha transcurrido, el canal **Done** se cierra y los recursos asociados con el contexto se liberan: 
+`func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc)`
+
+## WithValue
+
+El método WithValue devuelve una copia del contexto padre en el que el valor val está asociado con la clave key. Los valores de Context son perfectos para usarse con datos con alcance de solicitud:
+`func WithValue(parent Context, key interface{}, val interface{}) Context`
+
+## Uso de contextos
+
+El método **Context()** nos da acceso a una estructura context.Context, que siempre es no nula, ya que se inicializa cuando se crea originalmente la solicitud. Para solicitudes entrantes, el **http.Server** gestiona automáticamente el ciclo de vida del contexto, cancelándolo cuando la conexión del cliente se cierra. Para solicitudes salientes, Context controla la cancelación; es decir, si cancelamos el método Context(), podemos cancelar la solicitud saliente. Este concepto se ilustra en el siguiente ejemplo:
+
+```go
+func fetchGoogle(t *testing.T) {
+    r, _ := http.NewRequest("GET", "https://google.com", nil)
+
+    timeoutRequest, cancelFunc := context.WithTimeout(r.Context(), 1*time.Millisecond)
+    defer cancelFunc()
+
+    r = r.WithContext(timeoutRequest)
+
+    _, err := http.DefaultClient.Do(r)
+    if err != nil {
+        fmt.Println("Error:", err)
+    }
+}
+```
+
+En la línea `timeoutRequest, cancelFunc := context.WithTimeout(r.Context(), 1*time.Millisecond)`, estamos creando un contexto con tiempo de espera (timeout) a partir del original en la solicitud, y a diferencia de una solicitud entrante donde el contexto se cancela automáticamente, en una solicitud saliente debemos realizar este paso manualmente.
+
+La línea `r = r.WithContext(timeoutRequest)` implementa el segundo de los dos nuevos métodos de contexto que se han agregado al objeto http.Request:
+
+```go
+func (r *Request) WithContext(ctx context.Context) *Request
+```
+El método WithContext devuelve una copia superficial de la solicitud original en la que el contexto se ha cambiado al contexto ctx proporcionado.
+
+Cuando ejecutamos esta función, veremos que después de 1 milisegundo, la solicitud se completará con un error:
+
+```txt
+Error: Get https://google.com: context deadline exceeded
+```
+El contexto se agota antes de que la solicitud tenga la oportunidad de completarse, y el método Do devuelve inmediatamente. Esta es una excelente técnica para usar en conexiones salientes.
+
+---
+
+En el ejemplo anterior, podemos actualizar la conexión entrante para aprovechar el paquete context y así implementar un acceso seguro a objetos mediante goroutines. 
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"testing"
+	"time"
+)
+
+type validationContextKey string
+
+type helloWorldResponse struct {
+	Message string `json:"message"`
+}
+
+type helloWorldRequest struct {
+	Name string `json:"name"`
+}
+
+func main() {
+	port := 8080
+
+	handler := newValidationHandler(newHelloWorldHandler())
+	http.Handle("/helloworld", handler)
+
+	log.Printf("Server starting on port %v\n", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", port), nil))
+}
+
+type validationHandler struct {
+	next http.Handler
+}
+
+func newValidationHandler(next http.Handler) http.Handler {
+	return validationHandler{next: next}
+}
+
+func (h validationHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	var request helloWorldRequest
+	decoder := json.NewDecoder(r.Body)
+
+	err := decoder.Decode(&request)
+	if err != nil {
+		http.Error(rw, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	c := context.WithValue(r.Context(), validationContextKey("name"), request.Name)
+	r = r.WithContext(c)
+
+	h.next.ServeHTTP(rw, r)
+}
+
+type helloWorldHandler struct {
+}
+
+func newHelloWorldHandler() http.Handler {
+	return helloWorldHandler{}
+}
+
+func (h helloWorldHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	name := r.Context().Value(validationContextKey("name")).(string)
+	response := helloWorldResponse{Message: "Hello " + name}
+
+	encoder := json.NewEncoder(rw)
+	encoder.Encode(response)
+}
+
+func fetchGoogle(t *testing.T) {
+	r, _ := http.NewRequest("GET", "https://google.com", nil)
+
+	timeoutRequest, cancelFunc := context.WithTimeout(r.Context(), 1*time.Millisecond)
+	defer cancelFunc()
+
+	r = r.WithContext(timeoutRequest)
+
+	_, err := http.DefaultClient.Do(r)
+	if err != nil {
+		fmt.Println("Error:", err)
+	}
+}
+```
+En este código, cuando tenemos una solicitud válida, estamos creando un nuevo contexto para esta solicitud y luego establecemos el valor del campo Name en la solicitud dentro del contexto.
+
+En la `c := context.WithValue(r.Context(), validationContextKey("name"),request.Name)`, cuando agregas un elemento a un contexto usando WithValue, el método devuelve una copia del contexto anterior. Para ahorrar tiempo y simplificar el código, estamos utilizando un puntero al contexto. Para pasar esto como una copia a WithValue, debemos desreferenciar el puntero. Luego, para actualizar nuestro puntero, también debemos establecer el valor devuelto como el valor referenciado por el puntero, lo que significa que debemos desreferenciarlo nuevamente.
+
+Otro detalle a observar es la clave que estamos utilizando, validationContextKey, que es un tipo explícito declarado de string:
+`type validationContextKey string`
+Esta clave se utiliza para evitar colisiones en el contexto, ya que cada tipo de clave es único. De esta manera, podemos asegurarnos de que nuestro valor almacenado en el contexto sea seguro y no interfiera con otros valores potenciales.
+
+En el ejemplo anterior, al no usar una simple cadena de texto como clave para el contexto, evitamos posibles colisiones. Esto es especialmente importante cuando el contexto fluye a través de diferentes paquetes. Si se usara una cadena común como "name", podría haber un conflicto si otro paquete también usa el mismo nombre de clave. Al declarar un tipo a nivel de paquete como validationContextKey y utilizarlo, aseguramos que nuestros valores en el contexto sean únicos y no sean sobrescritos inadvertidamente por otro código.
+
+A continuación, en el helloWorldHandler, recuperamos el valor del contexto de la siguiente manera:
+
+```go
+func (h helloWorldHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+    name := r.Context().Value(validationContextKey("name")).(string)
+    response := helloWorldResponse{Message: "Hello " + name}
+
+    encoder := json.NewEncoder(rw)
+    encoder.Encode(response)
+}
+```
+Aquí, obtenemos el contexto y llamamos al método Value con nuestra clave validationContextKey("name"), que devuelve el valor asociado. Luego, hacemos un type assertion para convertirlo a una cadena.
+
+# Soporte RPC en la biblioteca estándar de Go
+Go ofrece un excelente soporte para RPC (Remote Procedure Call) en su biblioteca estándar. Aquí veremos cómo crear un cliente y un servidor que se comunican a través de RPC utilizando una interfaz compartida.
+
+## Ejemplo simple de RPC
+
+Veamos un ejemplo básico en el que utilizamos el paquete estándar rpc para construir una API basada en RPC en Go. Seguimos un ejemplo típico de "Hello World":
+
+```go
+// rpc/server/server.go
+type HelloWorldHandler struct{}
+
+func (h *HelloWorldHandler) HelloWorld(args *contract.HelloWorldRequest, reply *contract.HelloWorldResponse) error {
+    reply.Message = "Hello " + args.Name
+    return nil
+}
+```
+
+Al igual que en el ejemplo de creación de APIs REST usando la biblioteca estándar para RPC, también definiremos un handler. La diferencia entre este handler y http.Handler es que no necesita ajustarse a una interfaz; mientras tengamos un campo de struct con métodos, podemos registrarlo con el servidor RPC:
+
+```go
+func Register(rcvr interface{}) error
+```
+La función Register, que se encuentra en el paquete rpc, publica los métodos que forman parte de la interfaz dada en el servidor predeterminado y permite que sean llamados por los clientes que se conectan al servicio. El nombre del método usa el nombre del tipo concreto, por lo que, en este caso, si un cliente quiere llamar al método HelloWorld, se accedería a él usando HelloWorldHandler.HelloWorld. Si no deseamos usar el nombre del tipo concreto, podemos registrarlo con un nombre diferente usando la función RegisterName, que utiliza el nombre proporcionado en su lugar:
+
+```go
+func RegisterName(name string, rcvr interface{}) error
+```
+Esto permitiría mantener el nombre del campo de struct como sea significativo para mi código; sin embargo, para el contrato de cliente podría decidir usar algo diferente como Greet:
+
+```go
+func StartServer() {
+    helloWorld := &HelloWorldHandler{}
+    rpc.Register(helloWorld)
+
+    l, err := net.Listen("tcp", fmt.Sprintf(":%v", port))
+    if err != nil {
+        log.Fatal(fmt.Sprintf("No se pudo escuchar en el puerto dado: %s", err))
+    }
+
+    for {
+        conn, _ := l.Accept()
+        go rpc.ServeConn(conn)
+    }
+}
+```
+En la función StartServer, primero creamos una nueva instancia de nuestro handler y luego la registramos con el servidor RPC predeterminado.
+
+A diferencia de la comodidad de **net/http**, donde solo necesitamos crear un servidor con ListenAndServe, cuando usamos RPC necesitamos hacer un poco más de trabajo manual. En la línea `l, err := net.Listen("("tcp",", fmt.Sprintf(":%(":%v",", port))`, estamos creando un socket usando el protocolo dado y vinculándolo a la dirección IP y puerto. Esto nos da la capacidad de seleccionar específicamente el protocolo que queremos usar para el servidor: tcp, tcp4, tcp6, unix o unixpacket:
+
+```go
+func Listen(net, laddr string) (Listener, error)
+```
+La función Listen() devuelve una instancia que implementa la interfaz Listener:
+
+```go
+type Listener interface {
+    // Accept espera y devuelve la siguiente conexión al listener.
+    Accept() (Conn, error)
+    // Close cierra el listener.
+    // Cualquier operación Accept bloqueada se desbloqueará y devolverá errores.
+    Close() error
+    // Addr devuelve la dirección de red del listener.
+    Addr() Addr
+}
+```
+Para recibir conexiones, debemos llamar al método **Accept** en el listener. Si observas la línea `conn, _ := l.Accept()`, verás que tenemos un bucle infinito, esto es porque, a diferencia de **ListenAndServe** que bloquea para todas las conexiones, con un servidor RPC manejamos cada conexión de forma individual y, tan pronto como manejamos la primera conexión, necesitamos continuar llamando a Accept para manejar las conexiones subsiguientes o la aplicación saldrá. Accept es un método bloqueante, por lo que si no hay clientes intentando conectar al servicio, *Accept bloqueará hasta que uno lo haga*. Una vez que recibimos una conexión, necesitamos llamar al método Accept nuevamente para procesar la siguiente conexión. Si miras la línea `go rpc.ServeConn(conn)` en el código de ejemplo, verás que se llama al método **ServeConn**:
+```go
+func ServeConn(conn io.ReadWriteCloser)
+```
+El método ServeConn ejecuta el método DefaultServer en la conexión dada y bloqueará hasta que el cliente termine. En el ejemplo, usamos la declaración go antes de ejecutar el servidor para que podamos procesar inmediatamente la siguiente conexión en espera sin bloquear la conexión del primer cliente.
+---
+En términos de protocolo de comunicación, ServeConn utiliza el formato de serialización **gob**. El formato gob fue diseñado específicamente para facilitar la comunicación basada en Go, siendo más fácil de usar y posiblemente más eficiente que otros formatos como los **protocol buffers**, aunque con la desventaja de no ser ideal para la comunicación entre lenguajes diferentes.
+
+Con gob, los valores y tipos entre el origen y el destino no necesitan coincidir exactamente. Si un campo está presente en el origen pero no en la estructura receptora, el decodificador lo ignorará y continuará procesando sin error. Del mismo modo, si un campo está presente en el destino pero no en el origen, el decodificador lo ignorará y procesará el resto del mensaje. Esta flexibilidad contrasta con otros métodos RPC más antiguos, como JMI, que requerían que las interfaces del cliente y del servidor fueran idénticas, lo que generaba un acoplamiento estrecho entre las bases de código y complicaba la implementación de actualizaciones en la aplicación.
+
+Para realizar una solicitud a nuestro cliente, ya no podemos simplemente usar curl, ya que no estamos usando el protocolo HTTP ni el formato JSON. En su lugar, debemos crear un cliente RPC en Go:
+
+```go
+func CreateClient() *rpc.Client {
+    client, err := rpc.Dial("tcp", fmt.Sprintf("localhost:%v", port))
+    if err != nil {
+        log.Fatal("dialing:", err)
+    }
+    return client
+}
+```
+En el bloque anterior, se muestra cómo configurar **rpc.Client**. En la línea `client, err := rpc.Dial("tcp", fmt.Sprintf("localhost:%v", port))`, creamos el cliente usando la función **Dial()** del paquete rpc. Luego, utilizamos esta conexión devuelta para hacer una solicitud al servidor:
+
+```go
+func PerformRequest(client *rpc.Client) contract.HelloWorldResponse {
+    args := &contract.HelloWorldRequest{Name: "World"}
+    var reply contract.HelloWorldResponse
+
+    err := client.Call("HelloWorldHandler.HelloWorld", args, &reply)
+    if err != nil {
+        log.Fatal("error:", err)
+    }
+
+    return reply
+}
+```
+En la línea `err := client.Call("HelloWorldHandler.HelloWorld", args, &reply)`, estamos utilizando el método **Call()** del cliente para invocar la función nombrada en el servidor. Call es una función bloqueante que espera hasta que el servidor envíe una respuesta y escribe la respuesta en la referencia de HelloWorldResponse pasada al método. Si ocurre un error al procesar la solicitud, este se devuelve y se puede manejar adecuadamente.
+
+# RPC sobre HTTP
+
+En caso de que necesites usar HTTP como protocolo de transporte, el paquete rpc puede facilitarlo llamando al método **HandleHTTP**. 
+
+Este método configura dos endpoints en tu aplicación: 
+```go
+const (
+	// Defaults used by HandleHTTP
+	DefaultRPCPath = "/_"/_goRPC_"_"
+	DefaultDebugPath = "/"/debug/rpc""
+)
+```
+
+pero ten en cuenta que los mensajes siguen estando codificados en gob, por lo que sería necesario escribir un codificador y decodificador gob en JavaScript para comunicarse desde un navegador web, lo cual no es el propósito del paquete y no se recomienda. También, el endpoint de depuración no proporciona documentación generada automáticamente para tu API.
+Aquí hay un ejemplo de un servidor RPC sobre HTTP:
+
+```go
+func StartServer() {
+    helloWorld := &HelloWorldHandler{}
+    rpc.Register(helloWorld)
+    rpc.HandleHTTP()
+
+    l, err := net.Listen("tcp", fmt.Sprintf(":%v", port))
+    if err != nil {
+        log.Fatal(fmt.Sprintf("Unable to listen on given port: %s", err))
+    }
+
+    log.Printf("Server starting on port %v\n", port)
+    http.Serve(l, nil)
+}
+```
+En la línea 4, llamamos al método **rpc.HandleHTTP**, que es necesario cuando se usa HTTP con RPC, ya que registra los manejadores HTTP con el método DefaultServer. Luego, llamamos al método http.Serve y le pasamos el listener que estamos creando en la línea 6.
+
+
 
 
 

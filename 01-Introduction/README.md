@@ -738,8 +738,62 @@ func StartServer() {
     http.Serve(l, nil)
 }
 ```
-En la línea 4, llamamos al método **rpc.HandleHTTP**, que es necesario cuando se usa HTTP con RPC, ya que registra los manejadores HTTP con el método DefaultServer. Luego, llamamos al método http.Serve y le pasamos el listener que estamos creando en la línea 6.
+En la línea 4, llamamos al método **rpc.HandleHTTP**, que es necesario cuando se usa HTTP con RPC, ya que registra los manejadores HTTP con el método DefaultServer. Luego, llamamos al método **http.Serve** y le pasamos el listener que estamos creando en la línea 6 y el segundo parametro en nil ya que queremos que use el método **DefaultServer**.
 
+# JSON-RPC sobre HTTP
+
+Este último ejemplo, veremos el paquete **net/rpc/jsonrpc** que proporciona un códec integrado para serializar y deserializar al estándar JSON-RPC. 
+
+El método StartServer no contiene nada que no hayamos visto antes; es la configuración estándar del servidor RPC. La principal diferencia está en la línea 10, donde en lugar de iniciar el servidor RPC, estamos iniciando un servidor HTTP y pasándole el listener junto con un manejador:
+
+```go
+func StartServer() {  
+  helloWorld := new(HelloWorldHandler)  
+  rpc.Register(helloWorld)  
+ 
+  l, err := net.Listen("tcp", fmt.Sprintf(":%v", port))  
+  if err != nil {  
+    log.Fatal(fmt.Sprintf("Unable to listen on given port: %s", err))  
+  }  
+ 
+  http.Serve(l, http.HandlerFunc(httpHandler))  
+}
+```
+El manejador que estamos pasando al servidor es donde ocurre la "magia":
+
+```go
+func httpHandler(w http.ResponseWriter, r *http.Request) {  
+  serverCodec := jsonrpc.NewServerCodec(&HttpConn{in: r.Body, out: w})  
+  err := rpc.ServeRequest(serverCodec)  
+  if err != nil {  
+    log.Printf("Error while serving JSON request: %v", err)  
+    http.Error(w, "Error while serving JSON request, details have been logged.", 500)  
+    return  
+  }  
+}
+```
+En la línea 2, estamos llamando a la función **jsonrpc.NewServerCodec** y pasándole un tipo que implementa **io.ReadWriteCloser**. El método **NewServerCodec** devuelve un tipo que implementa **rpc.ClientCodec**, que tiene los siguientes métodos:
+
+```go
+type ClientCodec interface {  
+  WriteRequest(*Request, interface{}) error  
+  ReadResponseHeader(*Response) error  
+  ReadResponseBody(interface{}) error  
+  Close() error  
+}
+```
+Un tipo **ClientCodec** implementa la escritura de solicitudes RPC y la lectura de respuestas RPC. Para escribir una solicitud en la conexión, un cliente llama al método **WriteRequest**. Para leer la respuesta, el cliente debe llamar a **ReadResponseHeader** y **ReadResponseBody** como un par. Una vez que el cuerpo ha sido leído, es responsabilidad del cliente llamar al método Close para cerrar la conexión. Si se pasa una interfaz nil a **ReadResponseBody**, el cuerpo de la respuesta debe leerse y luego descartarse.
+
+```go
+type HttpConn struct {  
+  in  io.Reader  
+  out io.Writer  
+}
+func (c *HttpConn) Read(p []byte) (n int, err error) { return c.in.Read(p) }  
+func (c *HttpConn) Write(d []byte) (n int, err error) { return c.out.Write(d) }  
+func (c *HttpConn) Close() error { return nil }
+```
+El método **NewServerCodec** requiere que le pasemos un tipo que implemente la interfaz **ReadWriteCloser**. Como no tenemos tal tipo pasado como parámetro en el método **httpHandler**, hemos definido nuestro propio tipo, **HttpConn**, que encapsula el cuerpo de **http.Request**, que implementa **io.Reader**, y el método **ResponseWriter**, que implementa **io.Writer**. Luego, podemos escribir nuestros propios métodos que hagan proxy de las llamadas al lector y escritor, creando un tipo que tenga la interfaz correcta.
 
 
 

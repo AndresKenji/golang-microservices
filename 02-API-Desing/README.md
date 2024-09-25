@@ -353,11 +353,77 @@ RESPONSE HTTP 201 CREATED
 ```
 Esto es mucho más semántico; el usuario solo necesita leer la respuesta en caso de fallo si requiere más información. Además, podemos proporcionar un objeto de error estándar que se utilice en todos los puntos finales de nuestra API, lo que proporciona información adicional pero no obligatoria para determinar por qué falló una solicitud. Veremos los objetos de error en breve, pero por ahora, veamos los códigos de estado HTTP con más detalle.
 
+## 2xx Éxito
+Los códigos de estado 2xx indican que la solicitud del cliente ha sido recibida y comprendida con éxito.
 
+### 200 OK
+Este es un código de respuesta genérico que indica que la solicitud ha tenido éxito. La respuesta que acompaña este código generalmente es:
 
+  - GET: Una entidad que corresponde al recurso solicitado.
+  - HEAD: Los campos de cabecera correspondientes al recurso solicitado sin el cuerpo del mensaje.
+  - POST: Una entidad que describe o contiene el resultado de la acción.
 
+### 201 Created
+La respuesta Created se envía cuando una solicitud tiene éxito y el resultado es que se ha creado una nueva entidad. Junto con la respuesta, es común que la API devuelva un encabezado Location con la ubicación de la nueva entidad creada:
 
+```bash
+201 Created  
+Location: https://api.kittens.com/v1/kittens/123dfdf111
+```
+Es opcional devolver un cuerpo de objeto con este tipo de respuesta.
 
+### 204 No Content
+Este estado informa al cliente que la solicitud ha sido procesada con éxito; sin embargo, no habrá un cuerpo de mensaje en la respuesta. Por ejemplo, si el usuario realiza una solicitud DELETE a la colección, la respuesta puede devolver un estado 204.
+
+## 3xx Redirección
+Los códigos de estado de la clase 3xx indican que el cliente debe realizar una acción adicional para completar la solicitud. Muchos de estos códigos son utilizados por CDNs y otras técnicas de redirección de contenido; sin embargo, el código 304 puede ser especialmente útil al diseñar nuestras APIs para proporcionar retroalimentación semántica al cliente.
+
+### 301 Moved Permanently
+Este código indica al cliente que el recurso solicitado ha sido movido permanentemente a una ubicación diferente. Aunque se utiliza tradicionalmente para redirigir una página o recurso desde un servidor web, también puede ser útil al crear nuestras APIs. En el caso de que renombremos una colección, podríamos usar un redireccionamiento 301 para enviar al cliente a la ubicación correcta. Sin embargo, esto debe usarse como una excepción y no como la norma. Algunos clientes no siguen automáticamente los redireccionamientos 301, lo que añade complejidad para los consumidores.
+
+### 304 Not Modified
+Esta respuesta es generalmente utilizada por un CDN o servidor de caché y se establece para indicar que la respuesta no ha sido modificada desde la última llamada a la API. Está diseñada para ahorrar ancho de banda y la solicitud no devolverá un cuerpo, pero sí devolverá un encabezado Content-Location y Expires.
+
+## 4xx Error del Cliente
+En caso de un error causado por el cliente, no por el servidor, este último devolverá una respuesta 4xx y siempre incluirá una entidad que proporcione más detalles sobre el error.
+
+### 400 Bad Request
+Este código indica que el servidor no pudo entender la solicitud debido a un formato incorrecto o un fallo en la validación del dominio (datos faltantes o una operación que causaría un estado no válido).
+
+### 401 Unauthorized
+Este código indica que la solicitud requiere autenticación del usuario e incluirá un encabezado WWW-Authenticate que contiene un desafío aplicable al recurso solicitado. Si el usuario ha incluido las credenciales necesarias en el encabezado WWW-Authenticate, la respuesta debería incluir un objeto de error que contenga información diagnóstica relevante.
+
+### 403 Forbidden
+El servidor ha entendido la solicitud, pero se niega a cumplirla. Esto puede deberse a un nivel de acceso incorrecto al recurso, no a que el usuario no esté autenticado.
+Si el servidor no desea hacer público que una solicitud no puede acceder a un recurso debido al nivel de acceso, es permisible devolver un estado 404 Not Found en lugar de esta respuesta.
+
+### 404 Not Found
+Esta respuesta indica que el servidor no ha encontrado nada que coincida con el URI solicitado.
+No se da ninguna indicación de si la condición es temporal o permanente. Es permisible que el cliente realice múltiples solicitudes a este punto final, ya que el estado podría no ser permanente.
+
+### 405 Method Not Allowed
+El método especificado en la solicitud no está permitido para el recurso indicado por el URI. Esto puede suceder cuando el cliente intenta modificar una colección enviando un POST, PUT o PATCH a una colección que solo permite la recuperación de documentos.
+
+### 408 Request Timeout
+El cliente no produjo una solicitud dentro del tiempo que el servidor está dispuesto a esperar. El cliente puede repetir la solicitud sin modificaciones más tarde.
+
+## 5xx Server Error
+Los códigos de estado de respuesta dentro del rango 500 indican que algo ha salido mal, el servidor lo sabe y lamenta la situación.
+El RFC aconseja que se devuelva una entidad de error en la respuesta que explique si esto es permanente o temporal, y que contenga una explicación del error. Cuando examinemos el capítulo sobre seguridad, veremos la recomendación de no dar demasiada información en los mensajes de error, ya que este estado podría haber sido provocado por un usuario con la intención de comprometer tu sistema, y al devolver cosas como una traza de pila u otra información interna con un error 5xx, podrías ayudar a comprometer tu sistema. Con esto en mente, actualmente es común que un error 500 simplemente devuelva algo muy genérico.
+
+### 500 Internal Server Error
+Un mensaje de error genérico que indica que algo no salió como se esperaba.
+
+### 503 Service Unavailable
+El servidor no está disponible temporalmente debido a sobrecarga o mantenimiento.
+Existe un patrón útil que puedes implementar para evitar fallos en cascada en caso de un mal funcionamiento, donde el microservicio monitoriza su estado interno y, en caso de fallo o sobrecarga, se niega a aceptar la solicitud y señala esto al cliente de inmediato. Veremos este patrón en más detalle en el capítulo xx; sin embargo, este es probablemente el escenario donde querrás devolver un estado 503. Esto también puede usarse como parte de tus verificaciones de salud.
+
+# HTTP Headers
+Los encabezados de solicitud son una parte muy importante del proceso de solicitud y respuesta HTTP, y al implementar un enfoque estándar ayudas a tus usuarios a hacer la transición de una API a otra.
+En esta subsección, no cubriremos todos los encabezados posibles que puedes usar en tu API, pero analizaremos los encabezados más comunes. Para obtener información completa sobre el protocolo HTTP, consulta el RFC 7231 RFC 7231, que contiene una descripción completa del estándar actual.
+
+## Encabezados de solicitud estándar
+Los encabezados de solicitud proporcionan información adicional para la solicitud y la respuesta de tu API. Piénsalos como metadatos para la operación. Pueden utilizarse para ampliar otros datos de la respuesta que no pertenecen al cuerpo en sí, como la codificación del contenido. También pueden ser utilizados por el cliente para proporcionar información que ayude al servidor a procesar la respuesta. Siempre que sea posible, deberíamos usar los encabezados estándar, ya que esto ofrece consistencia a tu usuario y les proporciona un estándar común en múltiples puntos finales de diferentes proveedores.
 
 
 
